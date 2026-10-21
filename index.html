@@ -533,7 +533,7 @@ function drawGrid(){
   }
   url=big.toDataURL(); GRIDIMG.set(gk,url); if(GRIDIMG.size>30) GRIDIMG.delete(GRIDIMG.keys().next().value);
   }
-  if(gridLayer) gridLayer.setUrl(url); else gridLayer=L.imageOverlay(url,[[S0,W0],[N0,W1]],{pane:'grid',opacity:.85,interactive:false}).addTo(map);
+  if(gridLayer) gridLayer.setUrl(url); else gridLayer=L.imageOverlay(url,[[S0,W0],[N0,W1]],{pane:'grid',opacity:gridOpacity(),interactive:false}).addTo(map);
 }
 const HOURLY=new Map();
 async function loadHourly(spot){
@@ -735,8 +735,25 @@ const map=L.map('map',{preferCanvas:true, zoomControl:true, zoomSnap:0.5, maxZoo
 function fitMin(){ const sz=map.getSize(); if(sz.x<50||sz.y<50) return; const z=Math.max(5,map.getBoundsZoom(KOREA)-0.5); map.setMinZoom(z); if(map.getZoom()<z) map.setZoom(z); }
 map.fitBounds(KOREA);
 fitMin(); map.on('resize',fitMin);   // 창 크기가 바뀌거나 숨어 있던 화면이 보일 때 다시 계산
-map.createPane('labels').style.zIndex=450; map.getPane('labels').style.pointerEvents='none';
-map.createPane('grid').style.zIndex=350;   // 바다 컨디션 색: 바탕 지도 위, 지명·포인트 아래
+map.createPane('labels').style.zIndex=360; map.getPane('labels').style.pointerEvents='none';
+map.createPane('grid').style.zIndex=350;   // 바다 컨디션 색: 바탕 지도 위
+map.createPane('landmask').style.zIndex=390; map.getPane('landmask').style.pointerEvents='none';   // 내륙 가림: 지명·도로 위, 포인트 점(400) 아래
+/* 내륙은 낚시에 필요 없어 단색으로 덮고 해안선만 또렷하게. 가까이(줌 11↑) 보면 방파제·갯바위를 봐야 하니 서서히 걷힘 */
+let landLayer=null;
+const LAND_FILL='#151b22', LAND_LINE='#4a5866';
+function landOpacity(z){ return z>=11.5?0 : z>=11?0.25 : z>=10.5?0.5 : z>=10?0.75 : 0.94; }   // 해안선 자료가 1:10m라 가까이선 실제 해안과 어긋나서 일찍 걷음
+function drawLandMask(){
+  if(!LAND||!LAND.length) return;
+  if(!landLayer){
+    const rend=L.canvas({pane:'landmask', padding:0.3});
+    landLayer=L.layerGroup(LAND.map(poly=>L.polygon(poly[0].map(([x,y])=>[y,x]),{renderer:rend, pane:'landmask', interactive:false, stroke:true, color:LAND_LINE, weight:1, fillColor:LAND_FILL})));
+    landLayer.addTo(map);
+  }
+  const o=landOpacity(map.getZoom());
+  landLayer.eachLayer(l=>l.setStyle({fillOpacity:o, opacity:o?Math.min(1,o+0.1):0}));
+}
+map.on('zoomend',()=>{ if(landLayer) drawLandMask(); if(gridLayer) gridLayer.setOpacity(gridOpacity()); });
+function gridOpacity(){ const z=map.getZoom(); return z>=11.5?0.3 : z>=10.5?0.55 : 0.85; }   // 가까이 볼 땐 실제 해안·방파제가 보이게 컨디션 색을 옅게
 /* 바탕 지도: 기본 = OpenStreetMap(한글 지명·방파제까지)을 어둡게, '위성' = Esri 위성사진(갯바위 지형 확인). 둘 다 키 없음 */
 const ATTR=' · 예보 Open-Meteo · 물때 바다타임';
 const BASES={
@@ -1300,7 +1317,7 @@ $('#target').value=ST.target;
   try{ const p=await hget('/api/ping'); HELPER=!!p.ok; HKEY=!!p.key; OWNER=!!p.owner; LANURL=p.lan||''; }catch(e){ HELPER=false; }
   await loadPubWx();
   await loadDaily(); calcRecoTargets(); drawMarkers(); renderSteps(); buildTimeline(); loadFidx();
-  Promise.all([loadGrid(),loadLand()]).then(drawGrid);   // 바다 색은 포인트 다음에(요청이 몰리지 않게)
+  Promise.all([loadGrid(),loadLand()]).then(()=>{ drawGrid(); drawLandMask(); });   // 바다 색은 포인트 다음에(요청이 몰리지 않게)
   if(trip.point){ map.setView([trip.point.lat,trip.point.lon],Math.max(map.getMinZoom(),8)); loadPoint(); }
   if(!SHARED) showIntro();
 })();
