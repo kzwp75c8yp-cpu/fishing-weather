@@ -410,9 +410,21 @@ async function omGet(url){
   return r.json();
 }
 let DAILY={}, dailyErr='';
+/* 공개판: GitHub가 하루 두 번 모아 둔 예보(data/wx.json)를 먼저 씀 → 사용자마다 날씨 서버를 수백 번 부르지 않음(같은 와이파이·회사망은 요청 한도를 같이 씀).
+   파일이 없거나 14시간보다 오래되면 예전처럼 직접 받음. */
+let PUBWX=null;
+async function loadPubWx(){
+  if(HELPER) return;   // 내 맥·와이파이 판은 도우미가 있으니 직접 받음(공용 파일은 공개판에만 있음)
+  try{ const r=await fetch('data/wx.json',{cache:'no-cache'}); if(!r.ok) return; const j=await r.json(); if(!j.ts||Date.now()-j.ts>14*3600e3) return;
+    const conv=(o,f)=>{ const out={}; for(const id in o){ out[id]={}; for(const d in o[id]){ const a=o[id][d], x={}; f.forEach((k,i)=>{ if(a[i]!=null) x[k]=a[i]; }); out[id][d]=x; } } return out; };
+    PUBWX={t:j.t, spots:conv(j.spots,j.f.spot), grid:conv(j.grid,j.f.grid)};
+  }catch(e){}
+}
 async function loadDaily(){
-  const spots=allSpots(), ids=spots.map(s=>s.id).join(','), c=ls.get('fish.daily',null);
-  if(c&&c.ids===ids&&Date.now()-c.t<3600e3&&c.day===TODAY){ DAILY=c.data; return; }
+  if(PUBWX) Object.assign(DAILY,PUBWX.spots);
+  const spots=allSpots().filter(s=>!(PUBWX&&PUBWX.spots[s.id])), ids=spots.map(s=>s.id).join(','), c=ls.get('fish.daily',null);   // 공용 파일에 없는 포인트(내 지점)만 직접
+  if(!spots.length){ dailyErr=''; SC.clear(); return; }
+  if(c&&c.ids===ids&&Date.now()-c.t<3600e3&&c.day===TODAY){ Object.assign(DAILY,c.data); SC.clear(); return; }
   const la=spots.map(s=>s.lat.toFixed(3)).join(','), lo=spots.map(s=>s.lon.toFixed(3)).join(',');
   try{
     const [fc,sea]=await Promise.all([
@@ -427,8 +439,8 @@ async function loadDaily(){
         for(const d in acc){ (out[d]=out[d]||{}).sst=acc[d].reduce((a,b)=>a+b,0)/acc[d].length; } }
       data[s.id]=out;
     });
-    DAILY=data; dailyErr=''; ls.set('fish.daily',{t:Date.now(),ids,day:TODAY,data});
-  }catch(e){ dailyErr=e.message; if(c&&c.data){ DAILY=c.data; } setTimeout(()=>loadDaily().then(redrawAll),60e3); }
+    Object.assign(DAILY,data); SC.clear(); dailyErr=''; ls.set('fish.daily',{t:Date.now(),ids,day:TODAY,data});
+  }catch(e){ dailyErr=e.message; if(c&&c.data){ Object.assign(DAILY,c.data); SC.clear(); } setTimeout(()=>loadDaily().then(redrawAll),60e3); }
 }
 
 /* ══════════ 바다 상태 색 지도 (0.5° 격자 약 195칸) ══════════
@@ -439,8 +451,9 @@ let GRIDD={}, gridErr='', gridLayer=null, gridWind=true, gridVer=0;
 const GRIDIMG=new Map();   // 날짜·대상어별로 그린 그림을 기억 → 시간 바로 날짜를 옮길 때 다시 그리지 않음
 const gpt=(r,c)=>({id:`g${r}_${c}`, lat:G.lat0+r*G.dl, lon:G.lon0+c*G.dl});
 async function loadGrid(){
+  if(PUBWX&&Object.keys(PUBWX.grid).length){ GRIDD=PUBWX.grid; gridVer++; gridWind=true; gridErr=''; SC.clear(); return; }
   const c=ls.get('fish.grid2',null);
-  if(c&&Date.now()-c.t<3*3600e3&&c.day===TODAY){ GRIDD=c.data; gridVer++; return; }   // 넓은 지도 색은 3시간 저장
+  if(c&&Date.now()-c.t<3*3600e3&&c.day===TODAY){ GRIDD=c.data; gridVer++; SC.clear(); return; }   // 넓은 지도 색은 3시간 저장
   let sea=ls.get('fish.gridsea2',null);
   const all=[]; for(let r=0;r<G.rows;r++) for(let k=0;k<G.cols;k++) all.push(gpt(r,k));
   const q=pts=>`latitude=${pts.map(p=>p.lat).join(',')}&longitude=${pts.map(p=>p.lon).join(',')}`;
@@ -454,12 +467,12 @@ async function loadGrid(){
       for(const d in acc) (out[d]=out[d]||{}).sst=acc[d].reduce((a,b)=>a+b,0)/acc[d].length;
       data[p.id]=out; });
     if(!sea) ls.set('fish.gridsea2',Object.keys(data));
-    GRIDD=data; gridVer++; gridWind=false; drawGrid();   // 파고·수온 먼저 그림(바람 예보는 칸이 많으면 30초 넘게 걸릴 때가 있음)
+    GRIDD=data; gridVer++; SC.clear(); gridWind=false; drawGrid();   // 파고·수온 먼저 그림(바람 예보는 칸이 많으면 30초 넘게 걸릴 때가 있음)
     const sPts=all.filter(p=>data[p.id]);
     const F=[].concat(await omGet(`${OM}?${q(sPts)}&daily=wind_speed_10m_max,wind_gusts_10m_max,precipitation_sum&wind_speed_unit=ms&timezone=Asia%2FSeoul&forecast_days=14`));
     sPts.forEach((p,i)=>{ const f=F[i]&&F[i].daily; if(!f) return; f.time.forEach((d,j)=>Object.assign(data[p.id][d]=data[p.id][d]||{}, {wind:f.wind_speed_10m_max[j], gust:f.wind_gusts_10m_max[j], rain:f.precipitation_sum[j]})); });
-    GRIDD=data; gridVer++; gridWind=true; gridErr=''; ls.set('fish.grid2',{t:Date.now(),day:TODAY,data});
-  }catch(e){ gridErr=e.message; if(c&&c.data){ GRIDD=c.data; gridVer++; } setTimeout(()=>loadGrid().then(drawGrid),90e3); }
+    GRIDD=data; gridVer++; SC.clear(); gridWind=true; gridErr=''; ls.set('fish.grid2',{t:Date.now(),day:TODAY,data});
+  }catch(e){ gridErr=e.message; if(c&&c.data){ GRIDD=c.data; gridVer++; SC.clear(); } setTimeout(()=>loadGrid().then(drawGrid),90e3); }
 }
 const hex=h=>[1,3,5].map(i=>parseInt(h.slice(i,i+2),16));
 const LV5HEX={'매우좋음':'#1fbf8f','좋음':'#7bd34a','보통':'#e8c547','나쁨':'#f08a3c','매우나쁨':'#e5484d'};
@@ -534,7 +547,7 @@ async function loadHourly(spot){
     omGet(`${OM}?latitude=${spot.lat}&longitude=${spot.lon}&hourly=wind_speed_10m,wind_gusts_10m,wind_direction_10m,temperature_2m,precipitation,weather_code,pressure_msl&wind_speed_unit=ms&timezone=Asia%2FSeoul&forecast_days=14`),
     omGet(`${OMM}?latitude=${spot.lat}&longitude=${spot.lon}&hourly=wave_height,wave_period,wave_direction,sea_surface_temperature,sea_level_height_msl&timezone=Asia%2FSeoul&forecast_days=14`).catch(()=>null)]);
   const v={t:Date.now(), day:TODAY, fc:fc.hourly, sea:sea&&sea.hourly};
-  HOURLY.set(k,v);
+  HOURLY.set(k,v); SC.clear();
   const keys=Object.keys(store).sort((a,b)=>store[b].t-store[a].t).slice(0,7), next={}; keys.forEach(x=>next[x]=store[x]); next[k]=v; ls.set('fish.hourly',next);
   return v;
 }
@@ -560,12 +573,18 @@ function safety(d){
 }
 const LV5=[{min:80,n:'매우좋음',c:'var(--l5)'},{min:65,n:'좋음',c:'var(--l4)'},{min:45,n:'보통',c:'var(--l3)'},{min:25,n:'나쁨',c:'var(--l2)'},{min:-1,n:'매우나쁨',c:'var(--l1)'}];
 const lv5=sc=>LV5.find(l=>sc>=l.min);
+const SC=new Map();   // 판정 기억: 예보 자료가 바뀔 때 비움
 function score(spot,date,t=T()){
+  const k=spot.id+'|'+spot.lat+'|'+date+'|'+t.id; let r=SC.get(k);
+  if(r===undefined){ r=scoreRaw(spot,date,t); if(r) SC.set(k,r); }
+  return r||null;
+}
+function scoreRaw(spot,date,t){
   const d=dayData(spot,date); if(!d) return null;
   let sc=50; const plus=[], minus=[], mo=+date.slice(5,7);
   if(t.best.includes(mo)){sc+=15;plus.push('제철');} else if(t.ok.includes(mo)){sc+=5;plus.push('시즌 초입·끝물');} else {sc-=20;minus.push('비시즌');}
   if(d.sst!=null){ const s=d.sst;
-    if(s>=t.opt[0]&&s<=t.opt[1]){sc+=15;plus.push(`수온 ${r1(s)}° 적당`);} else if(s>=t.sst[0]&&s<=t.sst[1]){sc+=5;} else {sc-=20;minus.push(`수온 ${r1(s)}° ${s<t.sst[0]?'낮음':'높음'}`);} }
+    if(s>=t.opt[0]&&s<=t.opt[1]){sc+=15;plus.push(`수온 ${r1(s)}℃ 적당`);} else if(s>=t.sst[0]&&s<=t.sst[1]){sc+=5;} else {sc-=20;minus.push(`수온 ${r1(s)}℃ ${s<t.sst[0]?'낮음':'높음'}`);} }
   const L=lunarInfo(date), f=L.flow;
   const fok= t.flow==='low'? f<0.5 : t.flow==='high'? f>=0.6 : (f>=0.3&&f<=0.85);
   if(fok){sc+=10;plus.push(`${L.mul} 물때 맞음`);} else {sc-=5;minus.push(`${L.mul}`);}
@@ -634,7 +653,9 @@ async function loadKma(spot){
 async function loadFidx(){
   if(FIDX&&FIDX.items) return;
   if(HELPER&&HKEY){ try{ FIDX=await hget('/api/fish-index'); return; }catch(e){ FIDX={error:e.message}; } }
-  try{ const r=await fetch('data/fish-index.json',{cache:'no-cache'}); if(r.ok){ const j=await r.json(); if(j.items) FIDX={...j, pub:true}; } }catch(e){}   // 공개판: GitHub가 모아 둔 파일
+  try{ const r=await fetch('data/fish-index.json',{cache:'no-cache'}); if(r.ok){ const j=await r.json();
+    if(j.places){ const items=[]; for(const n in j.places){ const [lat,lot,o]=j.places[n]; for(const k in o){ const [ymd,noon]=k.split('|'); for(const f in o[k]) items.push({seafsPstnNm:n,lat,lot,predcYmd:ymd,predcNoonSeCd:noon,seafsTgfshNm:f,totalIndex:o[k][f]}); } } FIDX={t:j.t,items,pub:true}; }
+    else if(j.items) FIDX={...j, pub:true}; } }catch(e){}   // 공개판: GitHub가 모아 둔 파일
   if(trip.active==='wx') renderSteps();
 }
 
@@ -755,7 +776,7 @@ function updateClick(){
   clickPop.setContent(`<div class="ch">${md(d)} ${pad(h)}시 · ${esc(T().n)} · 물때 ${esc(nearestSt(sp.lat,sp.lon).s.n)}</div>
     ${r?`<div class="cr"><span class="lvtag" style="background:${lvHex(r)}">${r.ban?'금어기':r.lv.n}</span><b>${r.sc}</b><span class="cm">점 (그날)</span></div>`:'<div class="cm">이 날 예보 없음</div>'}
     <div class="cr"><span class="ck2">바람</span><b class="${c(w,SAFE.windWarn,SAFE.windBad)}">${r1(w)}</b><span class="cm">m/s ${dirName(wd)}</span></div>
-    <div class="cr"><span class="ck2">파도</span><b class="${c(wv,SAFE.waveWarn,SAFE.waveBad)}">${r1(wv)}</b><span class="cm">m</span><span class="ck2" style="margin-left:8px">수온</span><b>${r1(ss)}</b><span class="cm">°C</span></div>
+    <div class="cr"><span class="ck2">파도</span><b class="${c(wv,SAFE.waveWarn,SAFE.waveBad)}">${r1(wv)}</b><span class="cm">m</span><span class="ck2" style="margin-left:8px">수온</span><b>${r1(ss)}</b><span class="cm">℃</span></div>
     <div style="margin-top:6px"><button class="btn sm pri" id="clickPick">여기를 포인트로</button></div>`);
   const b=clickPop.getElement()&&clickPop.getElement().querySelector('#clickPick'); if(b) b.onclick=()=>{ map.closePopup(clickPop); choosePoint(sp); };
 }
@@ -821,7 +842,7 @@ function stepContent(id){
     const rec=RECO=recoList();   // 화면에 보인 목록 그대로 클릭에 씀
     return `<div class="row"><label>시작일</label><input class="in" type="date" id="fStart" min="${TODAY}" max="${LAST}" value="${trip.start}"></div>
       <div class="row"><label>종료일</label><input class="in" type="date" id="fEnd" min="${trip.start}" max="${LAST}" value="${addDays(trip.start,trip.nights)}"><span class="chip">${nightsLabel(trip.nights)}</span></div>
-      <div class="row"><label>대상어</label><select class="in" id="fTarget" style="flex:1">${TARGETS.map(x=>`<option value="${x.id}" ${x.id===ST.target?'selected':''}>${x.n} · ${x.m}</option>`).join('')}</select></div>
+      <div class="row"><label>대상어</label><select class="in" id="fTarget" style="flex:1"></select></div>
       <div class="note" style="margin-top:2px">예측은 오늘부터 최장 2주(${md(LAST)})까지. 파고·수온 예보는 약 8일까지라 그 뒤는 바람·물때·제철로만 판정해요.</div>
       <h3>추천 일정·포인트 <span class="rel">${ST.favs.length?'즐겨찾기 중':'전체 포인트'} · 위험한 날·금어기 제외</span></h3>
       <div class="reco">${rec.length? rec.map((x,i)=>`<div class="reco-item" data-rec="${i}"><span class="lvtag" style="background:${LV5HEX[lv5(x.sc).n]}">${lv5(x.sc).n} ${x.sc}</span> <b>${md(x.d)}${trip.nights?' – '+md(addDays(x.d,trip.nights)):''}</b> · ${esc(x.s.n)}${ST.favs.includes(x.s.id)?' ★':''}<div class="d">${esc(x.why.join(', '))}</div></div>`).join('') : '<div class="note">예보를 불러오는 중이거나 조건 맞는 날이 없어요.</div>'}</div>
@@ -850,7 +871,7 @@ function stepContent(id){
     const rows=days.map(d=>{ const r=score(s,d), L=lunarInfo(d), td=TIDE[s.bt]&&TIDE[s.bt].days&&TIDE[s.bt].days.find(x=>x.date===d);
       return `<tr data-d="${d}" class="${d===TL.date?'cur':''}"><td>${md(d)}</td><td>${r?`<span class="lvtag" style="background:${lvHex(r)}">${r.ban?'금어기':r.lv.n}</span> ${r.sc}`:'-'}</td><td>${td?td.mul:L.mul}</td><td>${r?r1(r.d.wave):'-'}</td><td>${r?r1(r.d.wind):'-'}</td><td>${r?r1(r.d.sst):'-'}</td><td>${r&&!r.ban?timeTxt(bestTime(s,d)):'-'}</td></tr>`; }).join('');
     return `${tr&&days.length>1?`<div class="card"><div class="verdict"><div class="big" style="background:${lvHex(tr)}">${tr.ban?'금어기':tr.lv.n}</div><div><b>일정 평균 ${tr.sc}점</b><div class="note" style="margin:0">${tr.bad?`위험(파고·강풍) ${tr.bad}일 — 절반 이상이면 매우나쁨`:'위험한 날 없음'}</div></div></div></div>`:''}
-      <table class="days"><tr><th>날짜</th><th>판정</th><th>물때</th><th>파고m</th><th>풍속</th><th>수온°</th><th>추천 시간</th></tr>${rows}</table>
+      <table class="days"><tr><th>날짜</th><th>판정</th><th>물때</th><th>파고(m)</th><th>풍속(m/s)</th><th>수온(℃)</th><th>추천 시간</th></tr>${rows}</table>
       <div class="note" style="margin-top:0">줄을 누르면 그날 자세히 · 아래 시간 바로 날짜·시각을 옮겨도 돼요.</div>
       <h3 style="color:var(--text);font-size:13px">${md(TL.date)} 자세히 ${days.includes(TL.date)?'':'<span class="rel">일정 밖 날짜</span>'}</h3>
       ${dayDetailHTML(s,TL.date,H)}
@@ -884,6 +905,7 @@ function bindStep(id, el){
   const on=(sel,f,ev='onclick')=>{ const x=el.querySelector(sel); if(x) x[ev]=f; };
   on('#logBtn',()=>openTools('log',{new:true}));
   if(id==='plan'){
+    fillTargets(); const ft=$('#fTarget'); if(ft) ft.dataset.h='';
     on('#fStart',e=>{ trip.start=e.target.value||TODAY; trip.nights=Math.max(0,Math.min(trip.nights,dayDiff(trip.start,LAST))); TL.date=trip.start; ST.date=TL.date; saveTrip(); redrawAll(); },'onchange');
     on('#fEnd',e=>{ trip.nights=Math.max(0,dayDiff(trip.start,e.target.value||trip.start)); saveTrip(); redrawAll(); },'onchange');
     on('#fTarget',e=>{ ST.target=e.target.value; saveState(); $('#target').value=ST.target; redrawAll(); },'onchange');
@@ -963,8 +985,8 @@ function dayDetailHTML(s,d,H){
   if(H){
     const rows=[0,3,6,9,12,15,18,21].map(h=>{ const w=hval(H.fc,'wind_speed_10m',d,h), g0=hval(H.fc,'wind_gusts_10m',d,h), g=g0!=null&&w!=null?Math.max(g0,w):g0 /* 모델이 섞여 돌풍<풍속으로 나올 때가 있어 풍속 이상으로 */, wd=hval(H.fc,'wind_direction_10m',d,h), wv=hval(H.sea,'wave_height',d,h), pe=hval(H.sea,'wave_period',d,h), ta=hval(H.fc,'temperature_2m',d,h), p=hval(H.fc,'precipitation',d,h), ss=hval(H.sea,'sea_surface_temperature',d,h);
       const c=(v,a,b)=>v==null?'':v>=b?'bad':v>=a?'warn':'';
-      return `<tr><td>${h}시</td><td class="${c(w,SAFE.windWarn,SAFE.windBad)}">${dirName(wd)} ${r1(w)}<span class="note">/${r1(g)}</span></td><td class="${c(wv,SAFE.waveWarn,SAFE.waveBad)}">${r1(wv)}${pe?`<span class="note">/${Math.round(pe)}s</span>`:''}</td><td>${r1(ss)}</td><td>${r1(ta)}</td><td>${p?r1(p):''}</td></tr>`; }).join('');
-    html+=`<h3>날씨 <span class="rel">Open-Meteo 예보</span></h3><table class="t"><tr><th>시각</th><th>바람/돌풍 m/s</th><th>파고 m/주기</th><th>수온°</th><th>기온°</th><th>비mm</th></tr>${rows}</table>`;
+      return `<tr><td>${h}시</td><td class="${c(w,SAFE.windWarn,SAFE.windBad)}">${dirName(wd)} ${r1(w)}<span class="note">/${r1(g)}</span></td><td class="${c(wv,SAFE.waveWarn,SAFE.waveBad)}">${r1(wv)}${pe?`<span class="note">/${Math.round(pe)}초</span>`:''}</td><td>${r1(ss)}</td><td>${r1(ta)}</td><td>${p?r1(p):''}</td></tr>`; }).join('');
+    html+=`<h3>날씨 <span class="rel">Open-Meteo 예보</span></h3><table class="t"><tr><th>시각</th><th>풍속/돌풍(m/s)</th><th>파고(m)/주기</th><th>수온(℃)</th><th>기온(℃)</th><th>강수(mm)</th></tr>${rows}</table>`;
   }
   html+=`<h3>바다낚시지수 <span class="rel">국립해양조사원 공식</span></h3>`;
   if(!(FIDX&&FIDX.items)) html+= (HELPER&&!HKEY)? `<div class="card"><div class="note" style="margin:0">공공데이터포털 인증키가 필요해요. 마이페이지의 일반 인증키를 <a href="#" id="goKey">도구 → 설정</a>에 붙여넣으세요.</div></div>`
@@ -987,7 +1009,7 @@ function dayDetailHTML(s,d,H){
     const near=d===TODAY||d===addDays(TODAY,1), lines=[...(near&&W&&W.now?W.now.lines:[]), ...(W&&W.pre?W.pre.lines:[])].filter(hit);
     const day=+d.slice(8), krows=S&&S.rows? S.rows.filter(x=>+(x.day.match(/^(\d+)/)||[])[1]===day) : [];
     html+=`<div class="card">${!z?'<div class="note" style="margin:0">해상예보 구역 밖이에요.</div>':`<div><b>${esc(z.name)}</b> ${lines.length?`<b style="color:var(--bad)">특보 있음</b>`:`<span style="color:var(--good)">${near?'특보 없음':'예비특보 없음'}</span>`}</div>${lines.map(l=>`<div class="kl hit">${esc(l)}</div>`).join('')}
-      ${krows.length?`<table class="t"><tr><th></th><th>날씨</th><th>풍향</th><th>풍속</th><th>파고</th></tr>${krows.flatMap(x=>['am','pm'].map((k,i)=>x[k]?`<tr><td>${i?'오후':'오전'}</td><td>${esc((x.wx||[])[i]||'')}</td><td>${esc(x[k].dir)}</td><td>${esc(x[k].wind)}</td><td>${esc(x[k].wave)}</td></tr>`:'')).join('')}</table>`:`<div class="note">${S?'기상청 해상 단기예보 범위(약 3일) 밖의 날짜예요.':'해상예보 불러오는 중…'}</div>`}`}
+      ${krows.length?`<table class="t"><tr><th></th><th>날씨</th><th>풍향</th><th>풍속(m/s)</th><th>파고(m)</th></tr>${krows.flatMap(x=>['am','pm'].map((k,i)=>x[k]?`<tr><td>${i?'오후':'오전'}</td><td>${esc((x.wx||[])[i]||'')}</td><td>${esc(x[k].dir)}</td><td>${esc(x[k].wind)}</td><td>${esc(x[k].wave)}</td></tr>`:'')).join('')}</table>`:`<div class="note">${S?'기상청 해상 단기예보 범위(약 3일) 밖의 날짜예요.':'해상예보 불러오는 중…'}</div>`}`}
       ${!near?'<div class="note">현재 발효 중인 특보는 오늘 기준이에요. 출조 1~2일 전에 다시 확인하세요.</div>':''}</div>`;
   }
   const bt=st.s.bt;
@@ -1016,9 +1038,15 @@ function bestTime(s,d,t=T()){
   return {s:9, e:15, why:['낮 물돌이 전후'], est:true};
 }
 const timeTxt=b=> b? `${pad(b.s)}~${pad(b.e%24)}시` : '-';
+let RECO_TG=[];
+function fillTargets(){   // 위 대상어 칸·계획의 대상어 칸: 추천 3종을 맨 위 '추천' 묶음에 ★로
+  const opt=t=>`<option value="${t.id}">${RECO_TG.includes(t.id)?'★ ':''}${t.n} · ${t.m}</option>`;
+  const html=(RECO_TG.length?`<optgroup label="${md(TL.date)} 추천">${RECO_TG.map(id=>opt(TARGETS.find(t=>t.id===id))).join('')}</optgroup><optgroup label="전체">`:'')+TARGETS.filter(t=>!RECO_TG.includes(t.id)).map(opt).join('')+(RECO_TG.length?'</optgroup>':'');
+  ['#target','#fTarget'].forEach(sel=>{ const el=$(sel); if(el&&el.dataset.h!==html){ el.innerHTML=html; el.dataset.h=html; } if(el) el.value=ST.target; });
+}
 function renderReco(){
   const el=$('#rcard'); if(!el) return;
-  if(!VIEW.reco){ el.innerHTML=''; return; }
+  if(!VIEW.reco){ el.innerHTML=''; }
   const d=TL.date, s=trip.point, mo=+d.slice(5,7);
   const list=TARGETS.map(t=>{
     let r=null, at=s;
@@ -1026,7 +1054,9 @@ function renderReco(){
     else allSpots().forEach(x=>{ const y=score(x,d,t); if(y&&(!r||y.sc>r.sc)){ r=y; at=x; } });   // 포인트를 안 골랐으면 그날 가장 좋은 항구 기준
     return {t, r, at};
   }).filter(x=>x.r&&!x.r.ban).sort((a,b)=>b.r.sc-a.r.sc);
-  const top=list.slice(0,3), bans=REGS.filter(x=>inBan(x,d)&&!x.maybe&&!(x.ban[0]==='01-01'&&x.ban[1]==='12-31')).map(x=>x.n);
+  const top=list.slice(0,3); RECO_TG=top.map(x=>x.t.id); fillTargets();
+  if(!VIEW.reco) return;
+  const bans=REGS.filter(x=>inBan(x,d)&&!x.maybe&&!(x.ban[0]==='01-01'&&x.ban[1]==='12-31')).map(x=>x.n);
   el.className='rcard'+(VIEW.recoFold?' folded':'');
   el.innerHTML=`<header id="rHead"><b>${md(d)} 추천 대상어</b><span class="s">${esc(s?s.n:'전국 포인트 중 가장 좋은 곳')} ${VIEW.recoFold?'▾':'▴'}</span></header>
     <div class="rb">${top.length? top.map((x,i)=>{ const b=bestTime(x.at,d,x.t), g=(GEAR[x.t.id]||[]).slice(0,3);
@@ -1118,7 +1148,8 @@ let LOGS=ls.get('fish.logs',[]); const saveLogs=()=>ls.set('fish.logs',LOGS);
 let GEARST=ls.get('fish.gear',{});   // {targetId:{extra:[], removed:[], done:[]}}
 const saveGear=()=>ls.set('fish.gear',GEARST);
 function openTools(tab='reg',opt={}){
-  const tabs=[['log','조과 기록'],['reg','금어기·금지체장'],['set','설정']];
+  const tabs=[['log','조과 기록'],['reg','금어기·금지체장'],['set','설정'],['help','사용법']];
+  if(tab==='help'){ showIntro(true); return; }
   $('#mh').innerHTML=tabs.map(([k,n])=>`<button class="btn sm ${k===tab?'tab on':''}" data-t="${k}">${n}</button>`).join('')+`<button class="btn sm x" id="mx">닫기</button>`;
   $('#mh').querySelectorAll('[data-t]').forEach(b=>b.onclick=()=>openTools(b.dataset.t));
   $('#mx').onclick=closeModal;
@@ -1151,7 +1182,7 @@ function logDefaults(){
   const s=ST.spot, t=T(), d=ST.date, r=s&&score(s,d), H=s&&HOURLY.get(s.lat.toFixed(2)+','+s.lon.toFixed(2)), tc=s&&H?tideCurve(s,d,H):null;
   return {id:'L'+Date.now(), no:(Math.max(0,...LOGS.map(l=>+l.no||0))+1), date:d, point:s?s.n.replace(/^선택 지점 /,'포인트 '):'', lat:s?s.lat:'', lon:s?s.lon:'',
     method:`${t.m}`, fish:[{name:t.n.split('(')[0],count:'',size:''}], rig:'', tin:'', tout:'', tide:tc?`${tc.mul}${tc.flow!=null?' · 물흐름 '+tc.flow+'%':''}`:'',
-    wx:r?`바람 최대 ${r1(r.d.wind)}m/s · 파고 ${r1(r.d.wave)}m · 기온 ${r1(r.d.tmin)}~${r1(r.d.tmax)}°`:'', sst:r&&r.d.sst!=null?r1(r.d.sst):'', buddy:'', memo:''};
+    wx:r?`바람 최대 ${r1(r.d.wind)}m/s · 파고 ${r1(r.d.wave)}m · 기온 ${r1(r.d.tmin)}~${r1(r.d.tmax)}℃`:'', sst:r&&r.d.sst!=null?r1(r.d.sst):'', buddy:'', memo:''};
 }
 let EDIT=null;
 function toolLog(opt={}){
@@ -1165,7 +1196,7 @@ function toolLog(opt={}){
       <h3>조과 (어종 · 마릿수 · 최대 크기 cm)</h3><div id="fishRows">${L.fish.map((f,i)=>`<div class="grid2" style="grid-template-columns:2fr 1fr 1fr auto;gap:6px;margin-bottom:4px"><input data-f="${i}" data-k="name" value="${esc(f.name)}" placeholder="어종" style="background:var(--card);border:1px solid var(--line);border-radius:6px;padding:6px"><input data-f="${i}" data-k="count" type="number" value="${esc(f.count)}" placeholder="마리" style="background:var(--card);border:1px solid var(--line);border-radius:6px;padding:6px"><input data-f="${i}" data-k="size" type="number" value="${esc(f.size)}" placeholder="cm" style="background:var(--card);border:1px solid var(--line);border-radius:6px;padding:6px"><button class="btn sm" data-rm="${i}">✕</button></div>`).join('')}</div>
       <button class="btn sm" id="addFish">어종 추가</button> <span class="note" id="sizeWarn"></span>
       <div class="grid2"><label class="f">채비·미끼(에기 색·호수)<input id="lRig" value="${esc(L.rig)}"></label><label class="f">동행<input id="lBuddy" value="${esc(L.buddy)}"></label>
-      <label class="f">물때(자동)<input id="lTide" value="${esc(L.tide)}"></label><label class="f">수온 °C(자동)<input id="lSst" value="${esc(L.sst)}"></label></div>
+      <label class="f">물때(자동)<input id="lTide" value="${esc(L.tide)}"></label><label class="f">수온 ℃(자동)<input id="lSst" value="${esc(L.sst)}"></label></div>
       <label class="f">날씨(자동)<input id="lWx" value="${esc(L.wx)}"></label>
       <label class="f">메모(입질 시간·패턴·다음에 할 것)<textarea id="lMemo" rows="3">${esc(L.memo)}</textarea></label>
       <div style="display:flex;gap:6px;margin-top:10px"><button class="btn pri" id="lSave">${OWNER?'저장 + 위키에 기록':'저장 (이 기기에만)'}</button><button class="btn" id="lCancel">취소</button></div>
@@ -1246,17 +1277,22 @@ function openShare(){
   $('#cpSum').onclick=()=>copy(tripSummaryText());
   $('#mx').onclick=closeModal; $('#modal').classList.add('open');
 }
-function showIntro(){
-  if(ls.get('fish.intro',0)) return;
-  $('#mh').innerHTML=`<b>낚시 날씨 — 처음 쓰는 법</b>`;
-  $('#mb').innerHTML=`<ol style="margin:0 0 0 18px;padding:0;line-height:1.9">
-      <li><b>왼쪽 위</b>에서 날짜(◀ ▶)를, 그 옆에서 대상어(무늬오징어·감성돔 등)를 고르세요. 왼쪽 <b>추천 대상어</b> 칸에 그 시기에 맞는 어종·채비·추천 시간이 나와요.</li>
-      <li><b>지도 색</b>이 그날 낚시 컨디션이에요 — <span style="color:var(--l5)">초록</span> 좋음 · <span style="color:var(--l3)">노랑</span> 보통 · <span style="color:var(--l1)">빨강</span> 나쁨. 점(항구)이나 바다 아무 곳을 누르세요.</li>
-      <li><b>오른쪽</b>에서 물때·입질 좋은 시간·날씨·금어기를 보고, <b>아래 시간 바</b>로 날짜·시각을 옮겨 보세요.</li></ol>
-    <div class="note">판정은 예보로 계산한 앱 추정이에요. 출조는 기상청 특보와 현장 상황으로 정하세요.</div>
-    <div class="btns"><button class="btn pri" id="introOk">시작하기</button></div>`;
+function showIntro(force){
+  if(!force&&ls.get('fish.intro',0)) return;
+  $('#mh').innerHTML=`<b>낚시 날씨 사용법</b><button class="btn sm x" id="mx">닫기</button>`;
+  $('#mb').innerHTML=`<div class="note" style="margin-top:0">바다낚시(갯바위·방파제·루어) 출조 날짜와 포인트를 고르는 앱이에요. 2주 예보·물때·제철·금어기를 한 화면에서 봐요.</div>
+    <ol style="margin:10px 0 0 18px;padding:0;line-height:1.85">
+      <li><b>날짜 고르기</b> — 왼쪽 위 <b>◀ 날짜 ▶</b>. 여러 날이면 '당일' 칸을 눌러 종료일까지.</li>
+      <li><b>대상어 고르기</b> — 그 옆 칸. <b>★</b>가 붙은 건 그 날짜에 잘 맞는 추천 어종이에요. 왼쪽 <b>추천 대상어</b> 칸에 이유·채비·추천 시간이 있어요.</li>
+      <li><b>지도 보기</b> — 바다 색이 그날 낚시 컨디션: <span style="color:var(--l5)">■</span> 매우좋음 <span style="color:var(--l4)">■</span> 좋음 <span style="color:var(--l3)">■</span> 보통 <span style="color:var(--l2)">■</span> 나쁨 <span style="color:var(--l1)">■</span> 매우나쁨. 점은 항구(포인트), 바다 아무 곳을 눌러도 그 지점 값이 나와요. '위성'으로 갯바위 지형 확인.</li>
+      <li><b>포인트 확인</b> — 점을 누르면 오른쪽 <b>낚시 계획</b>에 판정·물때(만조·간조)·입질 좋은 시간·몇 시까지 도착·날씨·금어기가 나와요.</li>
+      <li><b>시간 바</b> — 맨 아래 막대를 끌면 날짜·시각이 바뀌고 지도 색도 따라 바뀌어요.</li>
+      <li><b>공유</b> — 위 '공유'로 내 계획 링크를 보내면 받은 사람 화면이 같은 계획으로 열려요.</li></ol>
+    <div class="note">판정·추천은 예보로 계산한 앱 추정이에요. 출조는 기상청 특보와 현장 상황으로 정하세요. 이 화면은 위 '도구 → 사용법'에서 다시 볼 수 있어요.</div>
+    <div class="btns" style="align-items:center"><label style="margin-right:auto;display:flex;gap:6px;align-items:center;font-size:13px;cursor:pointer"><input type="checkbox" id="introNo" ${ls.get('fish.intro',0)?'checked':''} style="width:16px;height:16px"> 다시 보지 않기</label><button class="btn pri" id="introOk">시작하기</button></div>`;
   $('#modal').classList.add('open');
-  $('#introOk').onclick=()=>{ ls.set('fish.intro',1); closeModal(); };
+  const done=()=>{ ls.set('fish.intro',$('#introNo').checked?1:0); closeModal(); };
+  $('#introOk').onclick=done; $('#mx').onclick=done;
 }
 
 /* ══════════ 지도 링크·좌표로 포인트 등록 (다이빙 앱과 같은 해석기) ══════════ */
@@ -1298,8 +1334,7 @@ function regionLabel(lat,lon){ const n=nearestSt(lat,lon); return n.km<60? `${n.
 
 /* ══════════ 시작 ══════════ */
 try{ ['fish.grid','fish.gridsea','fish.land.v1','fish.land.v2','fish.state.old'].forEach(k=>localStorage.removeItem(k)); }catch(e){}   // 예전 판 저장분 정리
-$('#target').innerHTML=TARGETS.map(t=>`<option value="${t.id}">${t.n} · ${t.m}</option>`).join('');
-$('#target').value=ST.target;
+fillTargets();
 $('#target').onchange=e=>{ ST.target=e.target.value; saveState(); redrawAll(); };
 $('#toolsBtn').onclick=()=>openTools('log');
 $('#shareBtn').onclick=openShare;
@@ -1314,6 +1349,7 @@ $('#target').value=ST.target;
   applyView(); renderSteps(); buildTimeline(); renderLegend(); renderHint();
   try{ const p=await hget('/api/ping'); HELPER=!!p.ok; HKEY=!!p.key; OWNER=!!p.owner; LANURL=p.lan||''; }catch(e){ HELPER=false; }
   renderHint();
+  await loadPubWx();
   await loadDaily(); drawMarkers(); renderSteps(); buildTimeline(); renderReco(); loadFidx();
   Promise.all([loadGrid(),loadLand()]).then(drawGrid);   // 바다 색은 포인트 다음에(요청이 몰리지 않게)
   if(trip.point){ map.setView([trip.point.lat,trip.point.lon],Math.max(map.getMinZoom(),8)); loadPoint(); }
