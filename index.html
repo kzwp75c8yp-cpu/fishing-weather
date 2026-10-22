@@ -650,11 +650,14 @@ async function loadKma(spot){
 }
 async function loadFidx(){
   if(FIDX&&FIDX.items) return;
+  if(loadFidx.p) return loadFidx.p;   // 같은 파일을 두 번 받지 않게
+  return loadFidx.p=(async()=>{
   if(HELPER&&HKEY){ try{ FIDX=await hget('/api/fish-index'); return; }catch(e){ FIDX={error:e.message}; } }
   try{ const r=await fetch('data/fish-index.json',{cache:'no-cache'}); if(r.ok){ const j=await r.json();
     if(j.places){ const items=[]; for(const n in j.places){ const [lat,lot,o]=j.places[n]; for(const k in o){ const [ymd,noon]=k.split('|'); for(const f in o[k]) items.push({seafsPstnNm:n,lat,lot,predcYmd:ymd,predcNoonSeCd:noon,seafsTgfshNm:f,totalIndex:o[k][f]}); } } FIDX={t:j.t,items,pub:true}; }
     else if(j.items) FIDX={...j, pub:true}; } }catch(e){}   // 공개판: GitHub가 모아 둔 파일
   if(trip.active==='result') renderSteps();
+  })().finally(()=>{ loadFidx.p=null; });
 }
 
 /* ══════════ 물때 곡선과 시간대 추천 ══════════ */
@@ -1314,7 +1317,8 @@ const SHARED=readShared();
 $('#target').value=ST.target;
 (async function init(){
   applyView(); renderSteps(); buildTimeline(); renderLegend();
-  try{ const p=await hget('/api/ping'); HELPER=!!p.ok; HKEY=!!p.key; OWNER=!!p.owner; LANURL=p.lan||''; }catch(e){ HELPER=false; }
+  if(!/github\.io$/.test(location.hostname)){   // 공개판(GitHub)에는 도우미가 없으니 묻지 않음
+    try{ const p=await hget('/api/ping'); HELPER=!!p.ok; HKEY=!!p.key; OWNER=!!p.owner; LANURL=p.lan||''; }catch(e){ HELPER=false; } }
   await loadPubWx();
   await loadDaily(); calcRecoTargets(); drawMarkers(); renderSteps(); buildTimeline(); loadFidx();
   Promise.all([loadGrid(),loadLand()]).then(()=>{ drawGrid(); drawLandMask(); });   // 바다 색은 포인트 다음에(요청이 몰리지 않게)
